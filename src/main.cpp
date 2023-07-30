@@ -26,7 +26,7 @@ void p(char *fmt, ... ){
 
 void setup() {
   Serial.begin(9600);
-  
+  setTime(23,13,0,25,7,2023);
 }
 
 void loop() {
