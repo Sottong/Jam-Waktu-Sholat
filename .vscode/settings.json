@@ -15,6 +15,13 @@
         "functional": "cpp",
         "tuple": "cpp",
         "utility": "cpp",
-        "system_error": "cpp"
+        "system_error": "cpp",
+        "optional": "cpp",
+        "istream": "cpp",
+        "ostream": "cpp",
+        "ratio": "cpp",
+        "type_traits": "cpp",
+        "random": "cpp",
+        "chrono": "cpp"
     }
 }

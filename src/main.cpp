@@ -18,6 +18,10 @@
 #include <MD_MAX72xx.h>
 #include <SPI.h>
 
+#include <SoftwareSerial.h>
+
+
+
 //prototype function
 void pt_print();
 void time_print();
@@ -26,10 +30,88 @@ void get_time_from_ntp();
 void tombol_config();
 void printText1(char *pMsg, int LOS, bool CenterJustify);
 void clean();
+void printHelp();
+void sendMP3Command(char c);
+String decodeMP3Answer();
+void sendCommand(byte command);
+void sendCommand(byte command, byte dat1, byte dat2);
+int shex2int(char *s, int n);
+String sanswer(void);
+void notification();
+void display();
 
 
 /* global flag */
 bool time_sync = 0;
+bool pp_button = 0;
+
+/* Blynk */
+#define BLYNK_FIRMWARE_VERSION        "0.1.0"
+#define BLYNK_PRINT Serial
+#define APP_DEBUG
+#define USE_NODE_MCU_BOARD
+#define BLYNK_TEMPLATE_ID "TMPL6eIJrPxBi"
+#define BLYNK_TEMPLATE_NAME "Playlist"
+#define BLYNK_AUTH_TOKEN "6WAMzoEwKF1zxjFvbv4PcmhBslS4dw2k"
+
+#include <BlynkSimpleEsp8266.h>
+
+/* Fill in information from Blynk Device Info here */
+
+char ssid[] = "123";
+char pass[] = "kikikiki";
+
+WidgetLCD lcd(V2);
+
+/* MP3 */
+SoftwareSerial mp3(D3,D0);//Rx,Tx
+
+static int8_t Send_buf[8] = {0}; // Buffer untuk kirim perintah. 
+static uint8_t ansbuf[10] = {0}; // Buffer untuk respon. 
+
+String mp3Answer;           // respon dari MP3.
+
+String sanswer(void);
+String sbyte2hex(uint8_t b);
+
+/************ Command byte ************************************/
+//dari tabel pada manual book
+#define CMD_NEXT_SONG     0X01  // Play next song.
+#define CMD_PREV_SONG     0X02  // Play previous song.
+#define CMD_PLAY_W_INDEX  0X03
+#define CMD_VOLUME_UP     0X04
+#define CMD_VOLUME_DOWN   0X05
+#define CMD_SET_VOLUME    0X06
+
+#define CMD_SNG_CYCL_PLAY 0X08  // Single Cycle Play.
+#define CMD_SEL_DEV       0X09
+#define CMD_SLEEP_MODE    0X0A
+#define CMD_WAKE_UP       0X0B
+#define CMD_RESET         0X0C
+#define CMD_PLAY          0X0D
+#define CMD_PAUSE         0X0E
+#define CMD_PLAY_FOLDER_FILE 0X0F
+
+#define CMD_STOP_PLAY     0X16  // Stop playing continuously. 
+#define CMD_FOLDER_CYCLE  0X17
+#define CMD_SHUFFLE_PLAY  0x18 //
+#define CMD_SET_SNGL_CYCL 0X19 // Set single cycle.
+
+#define CMD_SET_DAC 0X1A
+#define DAC_ON  0X00
+#define DAC_OFF 0X01
+
+#define CMD_PLAY_W_VOL    0X22
+#define CMD_PLAYING_N     0x4C
+#define CMD_QUERY_STATUS      0x42
+#define CMD_QUERY_VOLUME      0x43
+#define CMD_QUERY_FLDR_TRACKS 0x4e
+#define CMD_QUERY_TOT_TRACKS  0x48
+#define CMD_QUERY_FLDR_COUNT  0x4f
+
+/************ Opitons **************************/
+#define DEV_TF            0X02  
+
 
 /* PrayerTime */
 double times[sizeof(TimeName)/sizeof(char*)];
@@ -219,10 +301,68 @@ void rtc_check(){
   }
 }
 
+//Blynk
+BLYNK_WRITE(V1) {   
+  // Called when the datastream virtual pin V2 is updated 
+  // by Blynk.Console, Blynk.App, or HTTP API. 
+
+  String value = param.asStr();
+  lcd.clear();
+  // OR:
+  //String value = param.asString();
+
+  if (value == "play") {
+    Serial.println("'play' button pressed");    
+    lcd.print(0, 0, "play :");
+    char c = 'p';
+    sendMP3Command(c);
+  } else if (value == "stop") {
+    Serial.println("'stop' button pressed"); 
+    lcd.print(0, 0, "pause :");
+    char c = 'P';
+    sendMP3Command(c);
+  } else if (value == "prev") {
+    Serial.println("'prev' button pressed");  
+    lcd.print(0, 0, "prev");
+    char c = '<';
+    sendMP3Command(c);
+  } else if (value == "next") {
+    Serial.println("'next' button pressed"); 
+    lcd.print(0, 0, "next");
+    char c = '>';
+    sendMP3Command(c);
+  } else {
+    Serial.print("V2 = '");
+    Serial.print(value);
+    Serial.println("'"); 
+       
+  }
+}
+
+// volume down
+BLYNK_WRITE(V3)
+{
+  char c = '-';
+  sendMP3Command(c);
+}
+
+//volume up
+BLYNK_WRITE(V4)
+{
+  char c = '+';
+  sendMP3Command(c);
+}
 
 void setup() {
   Serial.begin(9600);
 
+  // MP3
+  mp3.begin(9600);
+  delay(500);
+  sendCommand(CMD_SEL_DEV, 0, DEV_TF);
+  delay(500);
+
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
   pinMode(buttonPin, INPUT_PULLUP); // Set pin tombol sebagai INPUT_PULLUP (internal pull-up resistor)
   
   rtc_check();
@@ -241,13 +381,15 @@ void setup() {
 
   millis1 = millis()+10000;
   // interupt tombol config
-  attachInterrupt(digitalPinToInterrupt(buttonPin), tombol_config, CHANGE);
+  // attachInterrupt(digitalPinToInterrupt(buttonPin), tombol_config, CHANGE);
 
 }
 
 void loop() {
 
   RTC.read(tm);
+  Blynk.run();
+  notification();
 
   if(time_sync == 0){
     //masuk mode config
@@ -258,161 +400,51 @@ void loop() {
   }
   else{
     //running normal
-    Serial.println("waktu sinkron");
-    // sprintf(message,"%s", daysOfTheWeek[tm.Wday]);
-    // printText1(message, sizeof(message), true);
-    print_time();
-    Serial.println(millis());
-    Serial.println(millis1);
-    Serial.println(tm.Year-2000);
-    Serial.println(tm.Year%2000);
-    Serial.println(tm.Year);
-
-
-
-
-    if(pos==0)
-    {
-      hr = tm.Hour;
-      mn = tm.Minute;
-      sc = tm.Second;
-    
-      if(hr>12 && h12==1)
-      {
-        hr = hr-12;
+    if (mp3.available()){
+      Serial.println(decodeMP3Answer());
+      String str = decodeMP3Answer();
+      String sub = "Completed";
+      if(str.indexOf(sub) != -1){
+        char c = '>';
+        sendMP3Command(c);
       }
-    
-      zero1 = 0;
-      if(hr<10)
-        zero1 = 1;
-    
-      zero2 = 0;
-      if(mn<10)
-        zero2 = 1;
-    
-      zero3 = 0;
-      if(sc<10)
-        zero3 = 1;
-        
-      sprintf(message, "%s%d:%s%d:%s%d", zero[zero1], hr, zero[zero2], mn, zero[zero3], sc);
-      printText1(message, sizeof(message), true);
-      delay(500);
-      sprintf(message, "%s%d %s%d %s%d", zero[zero1], hr, zero[zero2], mn, zero[zero3], sc);
-      printText1(message, sizeof(message), true);
-      delay(500);
-
-      if(millis()>=millis1)
-      {
-        clean();
-        
-        pos=1;
-      }
-
     }
-
-
-
-    if(pos==1)
-    {
-      sprintf(message,"%s", daysOfTheWeek[tm.Wday]);
-      printText1(message, sizeof(message), true);
-      delay(1000);
-      
-      clean();
-      pos=2;
-    }
-    
-    if(pos==2)
-    {
-      sprintf(message, "%d/%d/%d", tm.Day, tm.Month,(tmYearToCalendar(tm.Year)%2000));
-      printText1(message, sizeof(message), true);
-      delay(1000);
-      
-      clean();
-      pos=4;
-      
-
-    }
-
-    if(pos==3)
-    {
-      sprintf(message, "%s", "SHOLAT");
-      printText1(message, sizeof(message), true);
-      delay(1000);
-      
-      clean();
-      pos=4;
-    }
-
-    if(pos==4)
-    {
-      get_prayer_times(tmYearToCalendar(tm.Year), tm.Month, tm.Day, Latitude, Longitude, GMT, times);
-
-      for (int i=0;i<sizeof(times)/sizeof(double);i++)
-      {
-        if(i != 4 && i != 7)
-        {
-          char tmp[10];
-          int hours, minutes;
-          get_float_time_parts(times[i], hours, minutes);
-          
-          sprintf(message, "%s", sholat[i]);
-          printText1(message, sizeof(message), true);
-          delay(1000);
-          clean();
-
-          zero1 = 0;
-          if(hours<10)
-            zero1 = 1;
-      
-          zero2 = 0;
-          if(minutes<10)
-            zero2 = 1;
-        
-          sprintf(message, "%s%d:%s%d", zero[zero1], hours, zero[zero2], minutes);
-          printText1(message, sizeof(message), true);
-          delay(1000);
-          clean();
-        }
-      }
-      millis1 = millis()+10000;
-      pos=0;
-    }
+    display();
   }
   // get_prayer_times (2023, 7, 25, Latitude, Longitude, GMT, times); 
 }
 
 /* interupt */
 
-ICACHE_RAM_ATTR void tombol_config() {
-  // Simpan waktu saat tombol ditekan
-  static unsigned long buttonPressStartTime = 0;
+// ICACHE_RAM_ATTR void tombol_config() {
+//   // Simpan waktu saat tombol ditekan
+//   static unsigned long buttonPressStartTime = 0;
   
-  // Membaca status tombol
-  bool buttonState = digitalRead(buttonPin);
+//   // Membaca status tombol
+//   bool buttonState = digitalRead(buttonPin);
 
-  // Tombol ditekan
-  if (buttonState == LOW) {
-    // Catat waktu penekanan tombol
-    buttonPressStartTime = millis();
-      Serial.println("TOMBOL DITEKAN ");
+//   // Tombol ditekan
+//   if (buttonState == LOW) {
+//     // Catat waktu penekanan tombol
+//     buttonPressStartTime = millis();
+//       Serial.println("TOMBOL DITEKAN ");
 
-  } else {
-    // Tombol dilepas
-    // Tombol ditekan selama 3 detik atau lebih
-    if (millis() - buttonPressStartTime >= longPressDuration) {
-      // Eksekusi fungsi yang diinginkan, dalam contoh ini kita hanya akan mengaktifkan LED
-      Serial.println(" ");
-      Serial.println("TOMBOL DITEKAN SELAMA 3 DETIK");
+//   } else {
+//     // Tombol dilepas
+//     // Tombol ditekan selama 3 detik atau lebih
+//     if (millis() - buttonPressStartTime >= longPressDuration) {
+//       // Eksekusi fungsi yang diinginkan, dalam contoh ini kita hanya akan mengaktifkan LED
+//       Serial.println(" ");
+//       Serial.println("TOMBOL DITEKAN SELAMA 3 DETIK");
 
-      time_sync = 0;
-      // Tambahkan fungsi lain yang ingin dieksekusi di sini
+//       time_sync = 0;
+//       // Tambahkan fungsi lain yang ingin dieksekusi di sini
 
-      // Set tombolPressed menjadi false untuk mencegah eksekusi berulang saat tombol tetap ditekan
-      buttonPressed = false;
-    }
-  }
-}
+//       // Set tombolPressed menjadi false untuk mencegah eksekusi berulang saat tombol tetap ditekan
+//       buttonPressed = false;
+//     }
+//   }
+// }
 
 /* RTC */
 
@@ -539,5 +571,377 @@ void clean()
   for (uint8_t i = 0; i < 8; i++) {
     mx.transform(MD_MAX72XX::TSD);
     delay(50);
+  }
+}
+
+void display(){
+
+  if(pos==0)
+  {
+    hr = tm.Hour;
+    mn = tm.Minute;
+    sc = tm.Second;
+  
+    if(hr>12 && h12==1)
+    {
+      hr = hr-12;
+    }
+  
+    zero1 = 0;
+    if(hr<10)
+      zero1 = 1;
+  
+    zero2 = 0;
+    if(mn<10)
+      zero2 = 1;
+  
+    zero3 = 0;
+    if(sc<10)
+      zero3 = 1;
+      
+    sprintf(message, "%s%d:%s%d:%s%d", zero[zero1], hr, zero[zero2], mn, zero[zero3], sc);
+    printText1(message, sizeof(message), true);
+    delay(500);
+    sprintf(message, "%s%d %s%d %s%d", zero[zero1], hr, zero[zero2], mn, zero[zero3], sc);
+    printText1(message, sizeof(message), true);
+    delay(500);
+
+    if(millis()>=millis1)
+    {
+      clean();
+      
+      pos=1;
+    }
+
+  }
+
+  if(pos==1)
+  {
+    sprintf(message,"%s", daysOfTheWeek[tm.Wday-1]);
+
+    printText1(message, sizeof(message), true);
+    delay(1000);
+    
+    clean();
+    pos=2;
+  }
+  
+  if(pos==2)
+  {
+    sprintf(message, "%d/%d/%d", tm.Day, tm.Month,(tmYearToCalendar(tm.Year)%2000));
+    printText1(message, sizeof(message), true);
+    delay(1000);
+    
+    clean();
+    pos=4;
+    
+
+  }
+
+  if(pos==3)
+  {
+    sprintf(message, "%s", "SHOLAT");
+    printText1(message, sizeof(message), true);
+    delay(1000);
+    
+    clean();
+    pos=4;
+  }
+
+  if(pos==4)
+  {
+    get_prayer_times(tmYearToCalendar(tm.Year), tm.Month, tm.Day, Latitude, Longitude, GMT, times);
+
+    for (int i=0;i<sizeof(times)/sizeof(double);i++)
+    {
+      if(i != 4 && i != 7)
+      {
+        char tmp[10];
+        int hours, minutes;
+        get_float_time_parts(times[i], hours, minutes);
+        
+        sprintf(message, "%s", sholat[i]);
+        printText1(message, sizeof(message), true);
+        delay(1000);
+        clean();
+
+        zero1 = 0;
+        if(hours<10)
+          zero1 = 1;
+    
+        zero2 = 0;
+        if(minutes<10)
+          zero2 = 1;
+      
+        sprintf(message, "%s%d:%s%d", zero[zero1], hours, zero[zero2], minutes);
+        printText1(message, sizeof(message), true);
+        delay(1000);
+        clean();
+      }
+    }
+    millis1 = millis()+300000;
+    pos=0;
+  }
+}
+
+
+// fungsi MP3
+void printHelp(){
+    Serial.println("HELP  ");
+    Serial.println(" h = Print again this Massage");
+    Serial.println(" p = Play");
+    Serial.println(" P = Pause");
+    Serial.println(" > = Next");
+    Serial.println(" < = Previous");
+    Serial.println(" s = Stop Play"); 
+    Serial.println(" + = Volume UP");
+    Serial.println(" - = Volume DOWN");
+    Serial.println(" c = Query current file");
+    Serial.println(" q = Query status");
+    Serial.println(" v = Query volume");
+    Serial.println(" x = Query folder count");
+    Serial.println(" t = Query total file count");
+    Serial.println(" f = Play folder 1.");
+    Serial.println(" S = Sleep");
+    Serial.println(" W = Wake up");
+    Serial.println(" r = Reset");
+  }
+//perintah dari karakter pada serial monitor
+void sendMP3Command(char c) {
+  switch (c) {
+    case '?':
+    case 'h':
+      printHelp();
+      break;
+
+    case 'p':
+      Serial.println("Play ");
+      sendCommand(CMD_PLAY);
+      break;
+
+    case 'P':
+      Serial.println("Pause");
+      sendCommand(CMD_PAUSE);
+      break;
+
+    case '>':
+      Serial.println("Next");
+      sendCommand(CMD_NEXT_SONG);
+      sendCommand(CMD_PLAYING_N); // cek nomor file yang di play
+      break;
+
+    case '<':
+      Serial.println("Previous");
+      sendCommand(CMD_PREV_SONG);
+      sendCommand(CMD_PLAYING_N); // cek nomor file yang di play
+      break;
+
+    case 's':
+      Serial.println("Stop Play");
+      sendCommand(CMD_STOP_PLAY);
+      break;
+
+
+    case '+':
+      Serial.println("Volume Up");
+      sendCommand(CMD_VOLUME_UP);
+      break;
+
+    case '-':
+      Serial.println("Volume Down");
+      sendCommand(CMD_VOLUME_DOWN);
+      break;
+
+    case 'c':
+      Serial.println("Query current file");
+      sendCommand(CMD_PLAYING_N);
+      break;
+
+    case 'q':
+      Serial.println("Query status");
+      sendCommand(CMD_QUERY_STATUS);
+      break;
+
+    case 'v':
+      Serial.println("Query volume");
+      sendCommand(CMD_QUERY_VOLUME);
+      break;
+
+    case 'x':
+      Serial.println("Query folder count");
+      sendCommand(CMD_QUERY_FLDR_COUNT);
+      break;
+
+    case 't':
+      Serial.println("Query total file count");
+      sendCommand(CMD_QUERY_TOT_TRACKS);
+      break;
+
+    case 'f':
+      Serial.println("Playing folder 1");
+      sendCommand(CMD_FOLDER_CYCLE, 1, 0);
+      break;
+
+    case 'S':
+      Serial.println("Sleep");
+      sendCommand(CMD_SLEEP_MODE);
+      break;
+
+    case 'W':
+      Serial.println("Wake up");
+      sendCommand(CMD_WAKE_UP);
+      break;
+
+    case 'r':
+      Serial.println("Reset");
+      sendCommand(CMD_RESET);
+      break;
+  }
+}
+
+
+//arti respon dari modul
+String decodeMP3Answer() {
+  String decodedMP3Answer = "";
+
+  decodedMP3Answer += sanswer();
+
+  switch (ansbuf[3]) {
+    case 0x3A:
+      decodedMP3Answer += " -> Memory card inserted.";
+      break;
+
+    case 0x3D:
+      decodedMP3Answer += " -> Completed play num " + String(ansbuf[6], DEC);
+      break;
+
+    case 0x40:
+      decodedMP3Answer += " -> Error";
+      break;
+
+    case 0x41:
+      decodedMP3Answer += " -> Data recived correctly. ";
+      break;
+
+    case 0x42:
+      decodedMP3Answer += " -> Status playing: " + String(ansbuf[6], DEC);
+      break;
+
+    case 0x48:
+      decodedMP3Answer += " -> File count: " + String(ansbuf[6], DEC);
+      break;
+
+    case 0x4C:
+      decodedMP3Answer += " -> Playing: " + String(ansbuf[6], DEC);
+      break;
+
+    case 0x4E:
+      decodedMP3Answer += " -> Folder file count: " + String(ansbuf[6], DEC);
+      break;
+
+    case 0x4F:
+      decodedMP3Answer += " -> Folder count: " + String(ansbuf[6], DEC);
+      break;
+  }
+
+  return decodedMP3Answer;
+}
+
+//kirim perintah 
+void sendCommand(byte command){
+  sendCommand(command, 0, 0);
+}
+
+void sendCommand(byte command, byte dat1, byte dat2){
+  delay(20);
+  Send_buf[0] = 0x7E;    //
+  Send_buf[1] = 0xFF;    //
+  Send_buf[2] = 0x06;    // Len
+  Send_buf[3] = command; //
+  Send_buf[4] = 0x01;    // 0x00 tanpa respon, 0x01 ada respon
+  Send_buf[5] = dat1;    // data1
+  Send_buf[6] = dat2;    // data2
+  Send_buf[7] = 0xEF;    //
+  Serial.print("Sending: ");
+  for (uint8_t i = 0; i < 8; i++){
+    mp3.write(Send_buf[i]) ;
+    Serial.print(sbyte2hex(Send_buf[i]));
+  }
+  Serial.println();
+}
+
+
+//konversi byte ke hex
+String sbyte2hex(uint8_t b){
+  String shex;
+
+  shex = "0X";
+
+  if (b < 16) shex += "0";
+  shex += String(b, HEX);
+  shex += " ";
+  return shex;
+}
+
+
+//konversi hex ke interger
+int shex2int(char *s, int n){
+  int r = 0;
+  for (int i=0; i<n; i++){
+     if(s[i]>='0' && s[i]<='9'){
+      r *= 16; 
+      r +=s[i]-'0';
+     }else if(s[i]>='A' && s[i]<='F'){
+      r *= 16;
+      r += (s[i] - 'A') + 10;
+     }
+  }
+  return r;
+}
+
+
+/********************************************************************************/
+/*Function: sanswer. Returns a String answer from mp3 UART module.          */
+/*Parameter:- uint8_t b. void.                                                  */
+/*Return: String. If the answer is well formated answer.                        */
+
+String sanswer(void){
+  uint8_t i = 0;
+  String mp3answer = "";
+
+  // Get only 10 Bytes
+  while (mp3.available() && (i < 10)){
+    uint8_t b = mp3.read();
+    ansbuf[i] = b;
+    i++;
+
+    mp3answer += sbyte2hex(b);
+  }
+
+  // if the answer format is correct.
+  if ((ansbuf[0] == 0x7E) && (ansbuf[9] == 0xEF)){
+    return mp3answer;
+  }
+
+  return "???: " + mp3answer;
+}
+
+
+void notification(){
+
+  get_prayer_times(tmYearToCalendar(tm.Year), tm.Month, tm.Day, Latitude, Longitude, GMT, times);
+  
+  for (int i=0;i<sizeof(times)/sizeof(double);i++)
+  {
+    if(i != 4 && i != 7)
+    {
+      int hours, minutes;
+      get_float_time_parts(times[i], hours, minutes);
+      if(tm.Minute == minutes && tm.Hour == hours){
+        //push notif
+        Blynk.logEvent("SHOLAT");
+
+      }
+    }
   }
 }
